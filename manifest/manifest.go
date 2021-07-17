@@ -48,6 +48,33 @@ type Entry struct {
 	TarHash     string `json:",omitempty"`
 }
 
+// MetaConfig represents additional image configuration supplied via
+// meta-packages that needs to be included in the image manifest.
+type MetaConfig struct {
+	// Architecture for which to build the image. Nixery defaults this to amd64 if
+	// not specified via meta-packages.
+	Arch string
+
+	// Additional labels to attach to an image
+	Labels map[string]string
+
+	// UID to set in the image (defaults to 0, i.e. usually root)
+	UID uint
+
+	// GID to set in the image (defaults to 0, i.e. usually root)
+	GID uint
+}
+
+// userConfig "renders" the configuration value for the container
+// image configuration based on the UID/GID values
+func (m *MetaConfig) userConfig() string {
+	if m.UID != 0 || m.GID != 0 {
+		return fmt.Sprintf("%d:%d", m.UID, m.GID)
+	} else {
+		return ""
+	}
+}
+
 type manifest struct {
 	SchemaVersion int     `json:"schemaVersion"`
 	MediaType     string  `json:"mediaType"`
@@ -64,9 +91,10 @@ type imageConfig struct {
 		DiffIDs []string `json:"diff_ids"`
 	} `json:"rootfs"`
 
-	// sic! empty struct (rather than `null`) is required by the
-	// image metadata deserialiser in Kubernetes
-	Config struct{} `json:"config"`
+	Config struct {
+		User   string `json:",omitempty"`
+		Labels map[string]string
+	} `json:"config"`
 }
 
 // ConfigLayer represents the configuration layer to be included in
@@ -83,12 +111,14 @@ type ConfigLayer struct {
 // Outside of this module the image configuration is treated as an
 // opaque blob and it is thus returned as an already serialised byte
 // array and its SHA256-hash.
-func configLayer(arch string, hashes []string) ConfigLayer {
+func configLayer(meta MetaConfig, hashes []string) ConfigLayer {
 	c := imageConfig{}
-	c.Architecture = arch
+	c.Architecture = meta.Arch
 	c.OS = os
 	c.RootFS.FSType = fsType
 	c.RootFS.DiffIDs = hashes
+	c.Config.Labels = meta.Labels
+	c.Config.User = meta.userConfig()
 
 	j, _ := json.Marshal(c)
 
@@ -103,7 +133,7 @@ func configLayer(arch string, hashes []string) ConfigLayer {
 // layer.
 //
 // Callers do not need to set the media type for the layer entries.
-func Manifest(arch string, layers []Entry) (json.RawMessage, ConfigLayer) {
+func Manifest(meta MetaConfig, layers []Entry) (json.RawMessage, ConfigLayer) {
 	// Sort layers by their merge rating, from highest to lowest.
 	// This makes it likely for a contiguous chain of shared image
 	// layers to appear at the beginning of a layer.
@@ -122,7 +152,7 @@ func Manifest(arch string, layers []Entry) (json.RawMessage, ConfigLayer) {
 		layers[i] = l
 	}
 
-	c := configLayer(arch, hashes)
+	c := configLayer(meta, hashes)
 
 	m := manifest{
 		SchemaVersion: schemaVersion,
